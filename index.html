@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ultimate Particle System</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', monospace; }
+        
+        /* HUD / Status Bar */
+        #status-bar {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(10, 10, 10, 0.9);
+            border: 1px solid #00ff88;
+            color: #00ff88;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: bold;
+            z-index: 100;
+            text-align: center;
+            min-width: 350px;
+            font-size: 14px;
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.2);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* Debug Video (Small, bottom left) */
+        #video-input {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 200px;
+            height: 150px;
+            border-radius: 10px;
+            transform: scaleX(-1); /* Mirror the webcam */
+            opacity: 0.6;
+            border: 2px solid #333;
+            z-index: 90;
+            object-fit: cover;
+        }
+        
+        /* UI Buttons */
+        #ui {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            z-index: 10;
+            flex-wrap: wrap;
+            justify-content: center;
+            width: 90%;
+            pointer-events: none; /* Let clicks pass through if not on button */
+        }
+        
+        button {
+            pointer-events: auto;
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: rgba(255, 255, 255, 0.8);
+            padding: 10px 18px;
+            border-radius: 25px;
+            cursor: pointer;
+            backdrop-filter: blur(4px);
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+
+        button:hover {
+            background: rgba(255, 255, 255, 0.2);
+            transform: translateY(-2px);
+        }
+
+        button.active {
+            background: #00ff88;
+            color: black;
+            border-color: #00ff88;
+            box-shadow: 0 0 15px rgba(0, 255, 136, 0.4);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="status-bar">Initializing AI...</div>
+    
+    <!-- Video hidden elements -->
+    <video id="video-input" autoplay muted playsinline></video>
+
+    <div id="ui">
+        <button onclick="setShape('galaxy')" class="active">Galaxy</button>
+        <button onclick="setShape('dna')">DNA</button>
+        <button onclick="setShape('torus')">Donut</button>
+        <button onclick="setShape('cube')">Cube</button>
+        <button onclick="setShape('heart')">Heart</button>
+        <button onclick="setShape('saturn')">Saturn</button>
+        <button onclick="setShape('flower')">Flower</button>
+        <button onclick="setShape('sphere')">Orb</button>
+    </div>
+
+    <!-- Import Modules -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+        // --- CONFIGURATION ---
+        const PARTICLE_COUNT = 35000; // High count for density
+        const PARTICLE_SIZE = 0.08;
+        const MORPH_SPEED = 0.06;
+        const GESTURE_COOLDOWN_MS = 1500; // Time between gesture triggers
+
+        // --- VARIABLES ---
+        let scene, camera, renderer, material, geometry, points;
+        let handLandmarker, video;
+        let time = 0;
+        let lastVideoTime = -1;
+        
+        // Data Arrays
+        const positions = new Float32Array(PARTICLE_COUNT * 3);
+        const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+        const colors = new Float32Array(PARTICLE_COUNT * 3);
+        
+        // State Management
+        const interaction = { active: false, x: 0, y: 0, pinch: 0, tiltX: 0 };
+        const shapeTemplates = ['galaxy', 'dna', 'torus', 'cube', 'heart', 'saturn', 'flower', 'sphere'];
+        let currentShapeIndex = 0;
+        let gestureCooldown = 0; 
+        let rainbowMode = false;
+
+        const statusBar = document.getElementById('status-bar');
+
+        initThree();
+        initParticles();
+        initMediaPipe();
+
+        // --- 1. THREE.JS SETUP ---
+        function initThree() {
+            scene = new THREE.Scene();
+            // Dark fog for depth
+            scene.fog = new THREE.FogExp2(0x000000, 0.02);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.z = 16;
+            camera.position.y = 0;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        // --- 2. PARTICLE ENGINE ---
+        function initParticles() {
+            geometry = new THREE.BufferGeometry();
+            
+            // Random start positions
+            for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                positions[i] = (Math.random() - 0.5) * 100;
+                colors[i] = 1.0;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            // Custom Shader for performance & rainbow effect
+            const vertexShader = `
+                attribute vec3 color; 
+                varying vec3 vColor; 
+                uniform float uSize; 
+                uniform float uTime; 
+                uniform float uRainbow;
+                
+                void main() {
+                    vec3 finalColor = color;
+                    
+                    // Rainbow Logic: If mode is on, override color based on position + time
+                    if(uRainbow > 0.5) {
+                        // Cosine palette generation
+                        finalColor = 0.5 + 0.5 * cos(uTime * 0.5 + position.xyx * 0.15 + vec3(0,2,4));
+                    }
+                    
+                    vColor = finalColor;
+                    
+                    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                    // Size attenuation (bigger when closer)
+                    gl_PointSize = uSize * (300.0 / -mvPosition.z);
+                    gl_Position = projectionMatrix * mvPosition;
+                }
+            `;
+
+            const fragmentShader = `
+                varying vec3 vColor;
+                void main() {
+                    // Make it a circle
+                    float r = distance(gl_PointCoord, vec2(0.5)); 
+                    if (r > 0.5) discard;
+                    
+                    // Soft glow gradient
+                    float glow = 1.0 - (r * 2.0); 
+                    glow = pow(glow, 1.5);
+                    
+                    gl_FragColor = vec4(vColor, glow);
+                }
+            `;
+
+            material = new THREE.ShaderMaterial({
+                uniforms: { 
+                    uSize: { value: PARTICLE_SIZE }, 
+                    uTime: { value: 0 },
+                    uRainbow: { value: 0.0 }
+                },
+                vertexShader, 
+                fragmentShader,
+                transparent: true, 
+                depthWrite: false, 
+                blending: THREE.AdditiveBlending
+            });
+
+            points = new THREE.Points(geometry, material);
+            scene.add(points);
+
+            // Initial Shape
+            calculateShape('galaxy');
+        }
+
+        // --- 3. SHAPE MATHEMATICS ---
+        function calculateShape(type) {
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                let x, y, z, r, g, b;
+                const idx = i * 3;
+
+                // --- SHAPE FORMULAS ---
+                if (type === 'galaxy') {
+                    const angle = i * 0.005; 
+                    const radius = (i % 2000) / 2000 * 8 + Math.random() * 0.5;
+                    const spin = angle * 3;
+                    x = Math.cos(spin) * radius; 
+                    y = (Math.random() - 0.5) * (radius * 0.2); 
+                    z = Math.sin(spin) * radius;
+                    r = 0.2 + radius/10; g = 0.3; b = 0.9 - radius/15;
+                } 
+                else if (type === 'dna') {
+                    // Double Helix
+                    const t = (i / PARTICLE_COUNT) * Math.PI * 20; 
+                    const side = (i % 2 === 0) ? 1 : -1;
+                    x = Math.cos(t) * 3 + (Math.random()-0.5)*0.5;
+                    y = (i / PARTICLE_COUNT) * 18 - 9;
+                    z = Math.sin(t) * 3 * side + (Math.random()-0.5)*0.5;
+                    r = (side===1)?0:1; g = 0.5; b = (side===1)?1:0;
+                }
+                else if (type === 'torus') {
+                    // Donut
+                    const u = Math.random() * Math.PI * 2; 
+                    const v = Math.random() * Math.PI * 2;
+                    const tube = 1.5; 
+                    const ring = 5;
+                    x = (ring + tube * Math.cos(v)) * Math.cos(u);
+                    y = (ring + tube * Math.cos(v)) * Math.sin(u);
+                    z = tube * Math.sin(v);
+                    r = 0.5 + Math.cos(u)*0.5; g = 0.2; b = 0.8;
+                }
+                else if (type === 'cube') {
+                    const size = 7;
+                    x = (Math.random() - 0.5) * size * 2; 
+                    y = (Math.random() - 0.5) * size * 2; 
+                    z = (Math.random() - 0.5) * size * 2;
+                    // Snap loose points to edges for wireframe look
+                    if (Math.random() > 0.8) {
+                        const face = Math.floor(Math.random() * 3);
+                        if(face === 0) x = Math.sign(x) * size;
+                        if(face === 1) y = Math.sign(y) * size;
+                        if(face === 2) z = Math.sign(z) * size;
+                    }
+                    r=0.0; g=1.0; b=0.6; // Matrix Green
+                }
+                else if (type === 'heart') {
+                    const phi = Math.acos( -1 + ( 2 * i ) / PARTICLE_COUNT ); 
+                    const theta = Math.sqrt( PARTICLE_COUNT * Math.PI ) * phi;
+                    x = 16 * Math.pow(Math.sin(theta), 3) * Math.sin(phi);
+                    y = (13 * Math.cos(theta) - 5 * Math.cos(2*theta) - 2 * Math.cos(3*theta) - Math.cos(4*theta)) * Math.sin(phi);
+                    z = 5 * Math.cos(phi);
+                    x *= 0.3; y *= 0.3; z *= 0.3; y += 1;
+                    r = 1.0; g = 0.05; b = 0.2;
+                } 
+                else if (type === 'saturn') {
+                    if (i < PARTICLE_COUNT * 0.7) {
+                        // Planet
+                        const phi = Math.acos( -1 + ( 2 * i ) / (PARTICLE_COUNT*0.7) ); 
+                        const theta = Math.sqrt( (PARTICLE_COUNT*0.7) * Math.PI ) * phi;
+                        const rad = 3.5;
+                        x = rad * Math.cos(theta) * Math.sin(phi); y = rad * Math.sin(theta) * Math.sin(phi); z = rad * Math.cos(phi);
+                        r = 0.9; g = 0.7; b = 0.4;
+                    } else {
+                        // Ring
+                        const angle = Math.random() * Math.PI * 2; 
+                        const rad = 5 + Math.random() * 3;
+                        x = Math.cos(angle) * rad; y = (Math.random() - 0.5) * 0.2; z = Math.sin(angle) * rad;
+                        r = 0.6; g = 0.6; b = 0.7;
+                    }
+                }
+                else if (type === 'flower') {
+                    const u = (i / PARTICLE_COUNT) * Math.PI * 20; 
+                    const v = (i / PARTICLE_COUNT) * Math.PI * 2;
+                    const rad = 3 + Math.cos(u * 5);
+                    x = rad * Math.cos(u) * Math.sin(v) * 2; 
+                    z = rad * Math.sin(u) * Math.sin(v) * 2; 
+                    y = Math.cos(v) * 4;
+                    r = 1.0; g = Math.abs(Math.sin(u)); b = 1.0;
+                }
+                else { // Sphere (Orb)
+                    const phi = Math.acos( -1 + ( 2 * i ) / PARTICLE_COUNT ); 
+                    const theta = Math.sqrt( PARTICLE_COUNT * Math.PI ) * phi;
+                    const rad = 5;
+                    x = rad * Math.cos(theta) * Math.sin(phi); 
+                    y = rad * Math.sin(theta) * Math.sin(phi); 
+                    z = rad * Math.cos(phi);
+                    r = (Math.sin(theta) + 1)/2; g = (Math.cos(phi) + 1)/2; b = 0.9;
+                }
+
+                targetPositions[idx] = x; 
+                targetPositions[idx+1] = y; 
+                targetPositions[idx+2] = z;
+                colors[idx] = r; colors[idx+1] = g; colors[idx+2] = b;
+            }
+            geometry.attributes.color.needsUpdate = true;
+        }
+
+        // --- 4. GESTURE RECOGNITION ---
+        function detectGesture(landmarks) {
+            const wrist = landmarks[0];
+            const tips = [8, 12, 16, 20]; // Index, Middle, Ring, Pinky
+            
+            // Calculate palm size (to make detection scale-independent)
+            const palmScale = Math.hypot(landmarks[9].x - wrist.x, landmarks[9].y - wrist.y);
+            
+            // Calculate distances from wrist to finger tips
+            const dIndex = Math.hypot(landmarks[8].x - wrist.x, landmarks[8].y - wrist.y);
+            const dMiddle = Math.hypot(landmarks[12].x - wrist.x, landmarks[12].y - wrist.y);
+            const dRing = Math.hypot(landmarks[16].x - wrist.x, landmarks[16].y - wrist.y);
+            const dPinky = Math.hypot(landmarks[20].x - wrist.x, landmarks[20].y - wrist.y);
+
+            const extendedThresh = palmScale * 1.8;
+            const curledThresh = palmScale * 1.4;
+
+            // 1. FIST (All curled)
+            if (dIndex < curledThresh && dMiddle < curledThresh && dRing < curledThresh && dPinky < curledThresh) {
+                return "FIST";
+            }
+            
+            // 2. PEACE (Index+Middle Out, Ring+Pinky In)
+            if (dIndex > extendedThresh && dMiddle > extendedThresh && dRing < curledThresh && dPinky < curledThresh) {
+                return "PEACE";
+            }
+
+            // 3. OPEN HAND (All Out)
+            if (dIndex > extendedThresh && dMiddle > extendedThresh && dRing > extendedThresh && dPinky > extendedThresh) {
+                return "OPEN";
+            }
+
+            return "NONE";
+        }
+
+        // --- 5. MEDIAPIPE AI SETUP ---
+        async function initMediaPipe() {
+            statusBar.innerHTML = "Downloading AI Model...";
+            try {
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+                );
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    numHands: 1
+                });
+                statusBar.innerHTML = "AI Ready. Starting Camera...";
+                startWebcam();
+            } catch (e) {
+                console.error(e);
+                statusBar.innerHTML = "AI Load Failed. Check Console.";
+                statusBar.style.color = "red";
+            }
+        }
+
+        async function startWebcam() {
+            video = document.getElementById('video-input');
+            const constraints = { video: { width: 640, height: 480 } };
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                
+                // CRITICAL: Ensure video plays for detection to work
+                await video.play();
+                
+                statusBar.innerHTML = "System Ready. Show Hand.";
+                statusBar.style.color = "#00ff88";
+                
+                predict(); // Start loop
+            } catch (err) {
+                console.error(err);
+                statusBar.innerHTML = "Camera Access Denied.";
+                statusBar.style.color = "red";
+            }
+        }
+
+        async function predict() {
+            // Safety Check
+            if (handLandmarker && video && video.readyState >= 2) {
+                // Only process if frame changed
+                if (video.currentTime !== lastVideoTime) {
+                    lastVideoTime = video.currentTime;
+                    
+                    const startTimeMs = performance.now();
+                    const results = handLandmarker.detectForVideo(video, startTimeMs);
+                    
+                    if (results.landmarks.length > 0) {
+                        interaction.active = true;
+                        const landmarks = results.landmarks[0];
+                        
+                        // 1. Positional Tracking
+                        const indexTip = landmarks[8];
+                        interaction.x = (0.5 - indexTip.x) * 20;
+                        interaction.y = (0.5 - indexTip.y) * 12;
+
+                        // 2. Pinch Strength (Index to Thumb)
+                        const thumbTip = landmarks[4];
+                        const pinchDist = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+                        // Normalize: <0.03 is 1 (closed), >0.15 is 0 (open)
+                        interaction.pinch = 1.0 - Math.min(Math.max((pinchDist - 0.03) / 0.15, 0), 1);
+
+                        // 3. Wrist Tilt (Left/Right) for Rotation Control
+                        // 0.5 is center. <0.5 is tilted left, >0.5 tilted right
+                        interaction.tiltX = (landmarks[0].x - 0.5) * 3; 
+
+                        // 4. Gesture Detection & Cooldowns
+                        const gesture = detectGesture(landmarks);
+                        const now = Date.now();
+
+                        if (now < gestureCooldown) {
+                            // Waiting state
+                            statusBar.style.color = "#ffee00";
+                            statusBar.innerHTML = "Processing...";
+                        } else {
+                            // Active State
+                            if (gesture === "FIST") {
+                                statusBar.innerHTML = "✊ FIST DETECTED: CHANGE SHAPE";
+                                statusBar.style.color = "#00ffff";
+                                changeToNextShape();
+                                gestureCooldown = now + GESTURE_COOLDOWN_MS;
+                            } 
+                            else if (gesture === "PEACE") {
+                                statusBar.innerHTML = "✌️ PEACE DETECTED: TOGGLE COLORS";
+                                statusBar.style.color = "#ff00ff";
+                                rainbowMode = !rainbowMode;
+                                material.uniforms.uRainbow.value = rainbowMode ? 1.0 : 0.0;
+                                gestureCooldown = now + 1000;
+                            } 
+                            else if (gesture === "OPEN") {
+                                statusBar.innerHTML = "✋ OPEN HAND: ROTATE MODE";
+                                statusBar.style.color = "#ffffff";
+                                // Logic is in animate()
+                            }
+                            else if (interaction.pinch > 0.8) {
+                                statusBar.innerHTML = "👌 PINCH: EXPLODE";
+                                statusBar.style.color = "#ff8800";
+                            }
+                            else {
+                                statusBar.innerHTML = "Hand Active";
+                                statusBar.style.color = "#00ff88";
+                            }
+                        }
+                    } else {
+                        interaction.active = false;
+                        interaction.pinch = 0;
+                        statusBar.innerHTML = "Scanning... Show Hand";
+                        statusBar.style.color = "#aaaaaa";
+                    }
+                }
+            }
+            window.requestAnimationFrame(predict);
+        }
+
+        // --- 6. LOGIC HELPERS ---
+        function changeToNextShape() {
+            currentShapeIndex = (currentShapeIndex + 1) % shapeTemplates.length;
+            const nextShape = shapeTemplates[currentShapeIndex];
+            window.setShape(nextShape);
+        }
+
+        window.setShape = (type) => {
+            currentShapeIndex = shapeTemplates.indexOf(type);
+            if (currentShapeIndex === -1) currentShapeIndex = 0;
+            
+            calculateShape(type);
+            
+            // Sync UI
+            document.querySelectorAll('#ui button').forEach(b => b.classList.remove('active'));
+            const btn = document.querySelector(`#ui button[onclick="setShape('${type}')"]`);
+            if(btn) btn.classList.add('active');
+        };
+
+        // --- 7. MAIN ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.01;
+            material.uniforms.uTime.value = time;
+            
+            const currentPos = geometry.attributes.position.array;
+
+            // Loop through all particles
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const idx = i * 3;
+                
+                // Get Base Target
+                let tx = targetPositions[idx];
+                let ty = targetPositions[idx+1];
+                let tz = targetPositions[idx+2];
+
+                // --- INTERACTION PHYSICS ---
+                if (interaction.active) {
+                    const dx = interaction.x - currentPos[idx];
+                    const dy = interaction.y - currentPos[idx+1];
+                    const dz = 0 - currentPos[idx+2]; 
+                    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                    
+                    const forceRadius = 5.0; // Size of influence area
+                    
+                    if (dist < forceRadius) {
+                        const force = (1.0 - dist / forceRadius);
+                        
+                        // Logic: Pinch = Repel (Explode), Open = Attract (Flow)
+                        if (interaction.pinch > 0.1) {
+                            const explodeStr = interaction.pinch * 12.0;
+                            tx -= (dx / dist) * explodeStr * force;
+                            ty -= (dy / dist) * explodeStr * force;
+                            tz -= (dz / dist) * explodeStr * force;
+                        } else {
+                            // Gentle attraction
+                            tx += (dx / dist) * 0.8 * force;
+                            ty += (dy / dist) * 0.8 * force;
+                        }
+                    }
+                }
+                
+                // Organic Noise (Breathing effect)
+                tx += Math.sin(time + i * 0.1) * 0.05;
+                ty += Math.cos(time + i * 0.05) * 0.05;
+
+                // Move particle towards target (Lerp)
+                currentPos[idx]   += (tx - currentPos[idx]) * MORPH_SPEED;
+                currentPos[idx+1] += (ty - currentPos[idx+1]) * MORPH_SPEED;
+                currentPos[idx+2] += (tz - currentPos[idx+2]) * MORPH_SPEED;
+            }
+            
+            geometry.attributes.position.needsUpdate = true;
+
+            // --- SCENE ROTATION ---
+            // If hand is active, let tilt control rotation. Otherwise auto-rotate.
+            if (interaction.active) {
+                // Smoothly interpolate rotation speed
+                scene.rotation.y += interaction.tiltX * 0.05;
+                scene.rotation.x += (interaction.y * 0.01);
+            } else {
+                scene.rotation.y += 0.002; // Idle spin
+                // Slowly return X to 0
+                scene.rotation.x *= 0.95;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
